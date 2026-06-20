@@ -8,9 +8,9 @@ locals {
   suffix = random_string.suffix.result
 }
 
-resource "azurerm_resource_group" "main" {
-  name     = "rg-${var.project_name}"
-  location = var.location
+
+data "azurerm_resource_group" "main" {
+  name = var.existing_resource_group_name
 }
 
 # ---------------------------------------------------------------------------
@@ -18,8 +18,8 @@ resource "azurerm_resource_group" "main" {
 # ---------------------------------------------------------------------------
 resource "azurerm_container_registry" "main" {
   name                = "acr${var.project_name}${local.suffix}"
-  resource_group_name = azurerm_resource_group.main.name
-  location            = azurerm_resource_group.main.location
+  resource_group_name = data.azurerm_resource_group.main.name
+  location            = data.azurerm_resource_group.main.location
   sku                 = "Standard"
   admin_enabled       = false # we authenticate via Azure AD / OIDC, not static admin creds
 }
@@ -31,8 +31,8 @@ resource "azurerm_container_registry" "main" {
 # ---------------------------------------------------------------------------
 resource "azurerm_kubernetes_cluster" "main" {
   name                = "aks-${var.project_name}"
-  resource_group_name = azurerm_resource_group.main.name
-  location            = azurerm_resource_group.main.location
+  resource_group_name = data.azurerm_resource_group.main.name
+  location            = data.azurerm_resource_group.main.location
   dns_prefix          = "${var.project_name}-${local.suffix}"
   kubernetes_version  = var.kubernetes_version
 
@@ -68,8 +68,8 @@ resource "azurerm_role_assignment" "aks_acr_pull" {
 # ---------------------------------------------------------------------------
 resource "azurerm_key_vault" "main" {
   name                       = "kv-${var.project_name}-${local.suffix}"
-  resource_group_name       = azurerm_resource_group.main.name
-  location                  = azurerm_resource_group.main.location
+  resource_group_name       = data.azurerm_resource_group.main.name
+  location                  = data.azurerm_resource_group.main.location
   tenant_id                 = data.azurerm_client_config.current.tenant_id
   sku_name                  = "standard"
   enable_rbac_authorization = true
@@ -81,8 +81,8 @@ data "azurerm_client_config" "current" {}
 # Workload identity used by pods to read secrets from Key Vault.
 resource "azurerm_user_assigned_identity" "workload" {
   name                = "id-${var.project_name}-workload"
-  resource_group_name = azurerm_resource_group.main.name
-  location            = azurerm_resource_group.main.location
+  resource_group_name = data.azurerm_resource_group.main.name
+  location            = data.azurerm_resource_group.main.location
 }
 
 resource "azurerm_role_assignment" "workload_kv_reader" {
@@ -95,7 +95,7 @@ resource "azurerm_role_assignment" "workload_kv_reader" {
 # to this Azure identity — this is the trust link, no secret involved.
 resource "azurerm_federated_identity_credential" "workload_staging" {
   name                = "fic-${var.project_name}-staging"
-  resource_group_name = azurerm_resource_group.main.name
+  resource_group_name = data.azurerm_resource_group.main.name
   parent_id           = azurerm_user_assigned_identity.workload.id
   audience            = ["api://AzureADTokenExchange"]
   issuer              = azurerm_kubernetes_cluster.main.oidc_issuer_url
@@ -104,9 +104,14 @@ resource "azurerm_federated_identity_credential" "workload_staging" {
 
 resource "azurerm_federated_identity_credential" "workload_production" {
   name                = "fic-${var.project_name}-production"
-  resource_group_name = azurerm_resource_group.main.name
+  resource_group_name = data.azurerm_resource_group.main.name
   parent_id           = azurerm_user_assigned_identity.workload.id
   audience            = ["api://AzureADTokenExchange"]
   issuer              = azurerm_kubernetes_cluster.main.oidc_issuer_url
   subject             = "system:serviceaccount:production:myapp-sa"
+}
+
+variable "existing_resource_group_name" {
+  description = "Name of the existing resource group to deploy into"
+  type        = string
 }

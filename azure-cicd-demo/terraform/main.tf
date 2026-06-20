@@ -34,6 +34,7 @@ resource "azurerm_kubernetes_cluster" "main" {
   resource_group_name = data.azurerm_resource_group.main.name
   location            = data.azurerm_resource_group.main.location
   dns_prefix          = "${var.project_name}-${local.suffix}"
+  node_resource_group = azurerm_resource_group.aks_nodes.name
   kubernetes_version  = var.kubernetes_version
 
   default_node_pool {
@@ -114,4 +115,10 @@ resource "azurerm_federated_identity_credential" "workload_production" {
 variable "existing_resource_group_name" {
   description = "Name of the existing resource group to deploy into"
   type        = string
+}
+
+resource "azurerm_resource_group" "aks_nodes" {
+  name     = "${data.azurerm_resource_group.main.name}-aks-nodes"
+  location = data.azurerm_resource_group.main.location
+  tags     = data.azurerm_resource_group.main.tags
 }

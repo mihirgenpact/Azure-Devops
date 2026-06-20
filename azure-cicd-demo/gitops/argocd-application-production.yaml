@@ -1,0 +1,30 @@
+# Apply once with: kubectl apply -f gitops/argocd-application-production.yaml
+# After this, Argo CD owns the production rollout — nothing else writes to this namespace.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: myapp-production
+  namespace: argocd
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/YOUR_ORG/azure-cicd-demo.git
+    targetRevision: main
+    path: helm/myapp
+    helm:
+      valueFiles:
+        - values.yaml
+        - values-production.yaml
+        - ../../gitops/production/values-production.yaml   # the file CI actually edits
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: production
+
+  syncPolicy:
+    automated:
+      prune: true      # remove resources no longer defined in Git
+      selfHeal: true   # revert any manual kubectl/helm change back to match Git
+    syncOptions:
+      - CreateNamespace=true

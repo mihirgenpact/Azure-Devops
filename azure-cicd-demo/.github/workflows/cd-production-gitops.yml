@@ -1,0 +1,35 @@
+name: CD - Production (GitOps promotion)
+
+on:
+  push:
+    tags: ["v*"]   # production releases are explicit, tag-driven — never automatic on main
+
+permissions:
+  contents: write   # only needs to commit a file change, never cluster credentials
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    environment: production   # require a manual approver in repo settings for this environment
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image tag
+        id: vars
+        run: echo "image_tag=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - name: Update production image tag in GitOps manifest
+        run: |
+          yq -i '.image.tag = "${{ steps.vars.outputs.image_tag }}"' gitops/production/values-production.yaml
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add gitops/production/values-production.yaml
+          git commit -m "promote: ${{ github.ref_name }} -> production (${{ steps.vars.outputs.image_tag }})"
+          git push
+
+      # That's it. No `helm upgrade`, no kubeconfig, no cluster access here.
+      # Argo CD (running inside the cluster) is watching this path and will
+      # detect + apply the change on its own within its sync interval.

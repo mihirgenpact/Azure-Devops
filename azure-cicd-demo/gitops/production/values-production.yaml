@@ -1,0 +1,10 @@
+# This file is the "source of truth" for what's running in production.
+# CI only ever edits the `image.tag` line below (see cd-production-gitops.yml).
+# Argo CD watches this file and reconciles the cluster to match it automatically.
+
+image:
+  repository: ""    # set once, manually, to <your-acr>.azurecr.io/myapp
+  tag: "unset"       # overwritten by the promotion workflow
+
+workloadIdentity:
+  clientId: ""        # set once, manually, to the Terraform output workload_identity_client_id

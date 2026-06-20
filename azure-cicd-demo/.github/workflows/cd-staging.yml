@@ -1,0 +1,52 @@
+name: CD - Staging (direct deploy)
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy-staging:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    environment: staging   # GitHub "environment" — can require reviewers, but staging is usually auto
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Get AKS credentials
+        run: |
+          az aks get-credentials \
+            --resource-group ${{ vars.AKS_RESOURCE_GROUP }} \
+            --name ${{ vars.AKS_CLUSTER_NAME }} \
+            --overwrite-existing
+
+      - name: Compute image tag (matches what CI just pushed)
+        id: vars
+        run: echo "image_tag=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - name: Helm upgrade --install (staging)
+        run: |
+          helm upgrade --install myapp ./helm/myapp \
+            --namespace staging --create-namespace \
+            -f ./helm/myapp/values-staging.yaml \
+            --set image.repository=${{ vars.ACR_LOGIN_SERVER }}/myapp \
+            --set image.tag=${{ steps.vars.outputs.image_tag }} \
+            --set workloadIdentity.clientId=${{ vars.WORKLOAD_IDENTITY_CLIENT_ID }} \
+            --wait --timeout 5m
+
+      - name: Smoke test
+        run: |
+          kubectl run smoke-test --rm -i --restart=Never --namespace staging \
+            --image=curlimages/curl -- curl -sf http://myapp.staging.svc.cluster.local/healthz

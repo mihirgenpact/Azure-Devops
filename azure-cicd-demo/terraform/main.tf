@@ -1,0 +1,112 @@
+resource "random_string" "suffix" {
+  length  = 6
+  special = false
+  upper   = false
+}
+
+locals {
+  suffix = random_string.suffix.result
+}
+
+resource "azurerm_resource_group" "main" {
+  name     = "rg-${var.project_name}"
+  location = var.location
+}
+
+# ---------------------------------------------------------------------------
+# Container registry — where CI pushes images after build + scan
+# ---------------------------------------------------------------------------
+resource "azurerm_container_registry" "main" {
+  name                = "acr${var.project_name}${local.suffix}"
+  resource_group_name = azurerm_resource_group.main.name
+  location            = azurerm_resource_group.main.location
+  sku                 = "Standard"
+  admin_enabled       = false # we authenticate via Azure AD / OIDC, not static admin creds
+}
+
+# ---------------------------------------------------------------------------
+# AKS cluster
+#   - oidc_issuer_enabled + workload_identity_enabled: lets Kubernetes
+#     ServiceAccounts assume Azure AD identities (no secrets stored in-cluster).
+# ---------------------------------------------------------------------------
+resource "azurerm_kubernetes_cluster" "main" {
+  name                = "aks-${var.project_name}"
+  resource_group_name = azurerm_resource_group.main.name
+  location            = azurerm_resource_group.main.location
+  dns_prefix          = "${var.project_name}-${local.suffix}"
+  kubernetes_version  = var.kubernetes_version
+
+  default_node_pool {
+    name       = "default"
+    node_count = var.aks_node_count
+    vm_size    = var.aks_node_vm_size
+  }
+
+  identity {
+    type = "SystemAssigned"
+  }
+
+  oidc_issuer_enabled       = true
+  workload_identity_enabled = true
+
+  network_profile {
+    network_plugin = "azure"
+    network_policy = "calico"
+  }
+}
+
+# Lets AKS nodes pull images from ACR without static credentials.
+resource "azurerm_role_assignment" "aks_acr_pull" {
+  scope                = azurerm_container_registry.main.id
+  role_definition_name = "AcrPull"
+  principal_id         = azurerm_kubernetes_cluster.main.kubelet_identity[0].object_id
+}
+
+# ---------------------------------------------------------------------------
+# Key Vault — app secrets, fetched via the Secrets Store CSI driver +
+# workload identity (see helm/myapp/templates/secretproviderclass.yaml)
+# ---------------------------------------------------------------------------
+resource "azurerm_key_vault" "main" {
+  name                       = "kv-${var.project_name}-${local.suffix}"
+  resource_group_name       = azurerm_resource_group.main.name
+  location                  = azurerm_resource_group.main.location
+  tenant_id                 = data.azurerm_client_config.current.tenant_id
+  sku_name                  = "standard"
+  enable_rbac_authorization = true
+  soft_delete_retention_days = 7
+}
+
+data "azurerm_client_config" "current" {}
+
+# Workload identity used by pods to read secrets from Key Vault.
+resource "azurerm_user_assigned_identity" "workload" {
+  name                = "id-${var.project_name}-workload"
+  resource_group_name = azurerm_resource_group.main.name
+  location            = azurerm_resource_group.main.location
+}
+
+resource "azurerm_role_assignment" "workload_kv_reader" {
+  scope                = azurerm_key_vault.main.id
+  role_definition_name = "Key Vault Secrets User"
+  principal_id         = azurerm_user_assigned_identity.workload.principal_id
+}
+
+# Federates the AKS ServiceAccount "myapp-sa" in namespace "production"/"staging"
+# to this Azure identity — this is the trust link, no secret involved.
+resource "azurerm_federated_identity_credential" "workload_staging" {
+  name                = "fic-${var.project_name}-staging"
+  resource_group_name = azurerm_resource_group.main.name
+  parent_id           = azurerm_user_assigned_identity.workload.id
+  audience            = ["api://AzureADTokenExchange"]
+  issuer              = azurerm_kubernetes_cluster.main.oidc_issuer_url
+  subject             = "system:serviceaccount:staging:myapp-sa"
+}
+
+resource "azurerm_federated_identity_credential" "workload_production" {
+  name                = "fic-${var.project_name}-production"
+  resource_group_name = azurerm_resource_group.main.name
+  parent_id           = azurerm_user_assigned_identity.workload.id
+  audience            = ["api://AzureADTokenExchange"]
+  issuer              = azurerm_kubernetes_cluster.main.oidc_issuer_url
+  subject             = "system:serviceaccount:production:myapp-sa"
+}

@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  id-token: write   # required for Azure OIDC login — no client secret stored anywhere
+  contents: read
+
+env:
+  IMAGE_NAME: myapp
+
+jobs:
+  lint-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Unit tests
+        run: pytest -v
+
+  build-scan-push:
+    needs: lint-test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'   # only build+push on actual merges/tags, not every PR
+    outputs:
+      image_tag: ${{ steps.vars.outputs.image_tag }}
+      acr_login_server: ${{ steps.acr.outputs.login_server }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image tag
+        id: vars
+        run: echo "image_tag=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - name: Azure login (OIDC, no secrets)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Get ACR login server
+        id: acr
+        run: |
+          LOGIN_SERVER=$(az acr show --name ${{ vars.ACR_NAME }} --query loginServer -o tsv)
+          echo "login_server=$LOGIN_SERVER" >> "$GITHUB_OUTPUT"
+
+      - name: ACR login
+        run: az acr login --name ${{ vars.ACR_NAME }}
+
+      - name: Build image
+        run: |
+          docker build \
+            --build-arg APP_VERSION=${{ steps.vars.outputs.image_tag }} \
+            -t ${{ steps.acr.outputs.login_server }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.image_tag }} \
+            app/
+
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: ${{ steps.acr.outputs.login_server }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.image_tag }}
+          severity: CRITICAL,HIGH
+          exit-code: "1"     # fails the job — and therefore blocks the push — on critical/high CVEs
+
+      - name: Push image to ACR
+        run: |
+          docker push ${{ steps.acr.outputs.login_server }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.image_tag }}

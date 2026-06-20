@@ -1,0 +1,17 @@
+replicaCount: 1
+env: staging
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 250m
+    memory: 256Mi
+
+ingress:
+  enabled: true
+  host: myapp-staging.example.com
+
+autoscaling:
+  enabled: false

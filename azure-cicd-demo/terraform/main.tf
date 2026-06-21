@@ -29,39 +29,8 @@ resource "azurerm_container_registry" "main" {
 #   - oidc_issuer_enabled + workload_identity_enabled: lets Kubernetes
 #     ServiceAccounts assume Azure AD identities (no secrets stored in-cluster).
 # ---------------------------------------------------------------------------
-resource "azurerm_kubernetes_cluster" "main" {
-  name                = "aks-${var.project_name}"
-  resource_group_name = data.azurerm_resource_group.main.name
-  location            = data.azurerm_resource_group.main.location
-  dns_prefix          = "${var.project_name}-${local.suffix}"
-  node_resource_group = azurerm_resource_group.aks_nodes.name
-  kubernetes_version  = var.kubernetes_version
-
-  default_node_pool {
-    name       = "default"
-    node_count = var.aks_node_count
-    vm_size    = var.aks_node_vm_size
-  }
-
-  identity {
-    type = "SystemAssigned"
-  }
-
-  oidc_issuer_enabled       = true
-  workload_identity_enabled = true
-
-  network_profile {
-    network_plugin = "azure"
-    network_policy = "calico"
-  }
-}
 
 # Lets AKS nodes pull images from ACR without static credentials.
-resource "azurerm_role_assignment" "aks_acr_pull" {
-  scope                = azurerm_container_registry.main.id
-  role_definition_name = "AcrPull"
-  principal_id         = azurerm_kubernetes_cluster.main.kubelet_identity[0].object_id
-}
 
 # ---------------------------------------------------------------------------
 # Key Vault — app secrets, fetched via the Secrets Store CSI driver +
@@ -86,22 +55,10 @@ resource "azurerm_user_assigned_identity" "workload" {
   location            = data.azurerm_resource_group.main.location
 }
 
-resource "azurerm_role_assignment" "workload_kv_reader" {
-  scope                = azurerm_key_vault.main.id
-  role_definition_name = "Key Vault Secrets User"
-  principal_id         = azurerm_user_assigned_identity.workload.principal_id
-}
+
 
 # Federates the AKS ServiceAccount "myapp-sa" in namespace "production"/"staging"
 # to this Azure identity — this is the trust link, no secret involved.
-resource "azurerm_federated_identity_credential" "workload_staging" {
-  name                = "fic-${var.project_name}-staging"
-  resource_group_name = data.azurerm_resource_group.main.name
-  parent_id           = azurerm_user_assigned_identity.workload.id
-  audience            = ["api://AzureADTokenExchange"]
-  issuer              = azurerm_kubernetes_cluster.main.oidc_issuer_url
-  subject             = "system:serviceaccount:staging:myapp-sa"
-}
 
 resource "azurerm_federated_identity_credential" "workload_production" {
   name                = "fic-${var.project_name}-production"
@@ -115,10 +72,4 @@ resource "azurerm_federated_identity_credential" "workload_production" {
 variable "existing_resource_group_name" {
   description = "Name of the existing resource group to deploy into"
   type        = string
-}
-
-resource "azurerm_resource_group" "aks_nodes" {
-  name     = "${data.azurerm_resource_group.main.name}-aks-nodes"
-  location = data.azurerm_resource_group.main.location
-  tags     = data.azurerm_resource_group.main.tags
 }
